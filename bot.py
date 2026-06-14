@@ -388,14 +388,17 @@ class CasterBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.members = True
+        intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.db = CasterDB(DB_PATH)
         self.request_view = CasterRequestView(self)
         self.ready_view = ReadyCasterView(self)
 
     async def setup_hook(self) -> None:
+        # Add views for persistent button interactions
         self.add_view(self.request_view)
         self.add_view(self.ready_view)
+        
         guild_id = os.getenv("DISCORD_GUILD_ID")
         if guild_id:
             guild = discord.Object(id=int(guild_id))
