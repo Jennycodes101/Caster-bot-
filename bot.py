@@ -415,6 +415,26 @@ class CasterBot(commands.Bot):
             return any(role.id == int(role_id) for role in user.roles)
         return any(role.name.lower() == "caster" for role in user.roles)
 
+    async def ensure_caster_requests_channel(self, guild: discord.Guild) -> discord.TextChannel:
+        """Ensure the caster-requests channel exists"""
+        saved_id = self.db.get_setting(f"caster_requests_channel:{guild.id}")
+        if saved_id:
+            existing = guild.get_channel(int(saved_id))
+            if isinstance(existing, discord.TextChannel):
+                return existing
+
+        channel = discord.utils.get(guild.text_channels, name="caster-requests")
+        if channel is None:
+            bot_member = guild.me or guild.get_member(self.user.id)  # type: ignore[arg-type]
+            overwrites = {
+                guild.default_role: discord.PermissionOverwrite(view_channel=True, send_messages=False),
+            }
+            if bot_member is not None:
+                overwrites[bot_member] = discord.PermissionOverwrite(view_channel=True, send_messages=True)
+            channel = await guild.create_text_channel("caster-requests", overwrites=overwrites)
+        self.db.set_setting(f"caster_requests_channel:{guild.id}", str(channel.id))
+        return channel
+
     async def ensure_log_channel(self, guild: discord.Guild) -> discord.TextChannel:
         saved_id = self.db.get_setting(f"log_channel:{guild.id}")
         if saved_id:
@@ -449,11 +469,13 @@ class CasterBot(commands.Bot):
         guild = self.get_guild(req.guild_id)
         if guild is None:
             return
-        channel = guild.get_channel(req.channel_id)
-        if not isinstance(channel, discord.TextChannel):
+        # Get the caster-requests channel instead of the stored channel
+        try:
+            caster_requests_channel = await self.ensure_caster_requests_channel(guild)
+        except Exception:
             return
         try:
-            message = await channel.fetch_message(req.activity_message_id)
+            message = await caster_requests_channel.fetch_message(req.activity_message_id)
         except (discord.NotFound, discord.Forbidden):
             return
         embed = build_request_embed(req, self.db.count_available(req.request_id))
@@ -462,8 +484,10 @@ class CasterBot(commands.Bot):
     async def send_assignment_notifications(self, guild: Optional[discord.Guild], req: CastRequest) -> None:
         if guild is None:
             return
-        channel = guild.get_channel(req.channel_id)
-        if not isinstance(channel, discord.TextChannel):
+        # Send notifications to the caster-requests channel
+        try:
+            caster_requests_channel = await self.ensure_caster_requests_channel(guild)
+        except Exception:
             return
 
         caster_mention = f"<@{req.assigned_caster_id}>" if req.assigned_caster_id else "Unknown"
@@ -473,7 +497,7 @@ class CasterBot(commands.Bot):
         embed.add_field(name="Requester", value=requester_mention, inline=False)
         embed.add_field(name="Event Type", value=req.event_type, inline=False)
         embed.add_field(name="Event Time", value=req.event_time, inline=False)
-        await channel.send(content=f"{caster_mention} {requester_mention}", embed=embed)
+        await caster_requests_channel.send(content=f"{caster_mention} {requester_mention}", embed=embed)
 
         requester = guild.get_member(req.requester_id)
         if requester:
@@ -510,8 +534,8 @@ bot = CasterBot()
 async def requestcast(
     interaction: discord.Interaction, event_type: str, event_time: str, additional_notes: Optional[str] = ""
 ) -> None:
-    if interaction.guild is None or not isinstance(interaction.channel, discord.TextChannel):
-        await interaction.response.send_message("This command can only be used in a server text channel.", ephemeral=True)
+    if interaction.guild is None:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
         return
 
     last_used = bot.db.get_last_request_time(interaction.user.id)
@@ -530,9 +554,16 @@ async def requestcast(
             )
             return
 
+    # Get the caster-requests channel
+    try:
+        caster_requests_channel = await bot.ensure_caster_requests_channel(interaction.guild)
+    except Exception as e:
+        await interaction.response.send_message(f"Error creating caster-requests channel: {e}", ephemeral=True)
+        return
+
     req = bot.db.create_request(
         interaction.guild.id,
-        interaction.channel.id,
+        caster_requests_channel.id,
         interaction.user.id,
         event_type.strip(),
         event_time.strip(),
@@ -542,12 +573,12 @@ async def requestcast(
     role_id = os.getenv("CASTER_ROLE_ID")
     role_ping = f"<@&{role_id}>" if role_id else "@Caster"
     embed = build_request_embed(req, available_count=0)
-    activity_message = await interaction.channel.send(content=f"{role_ping} New caster request!", embed=embed, view=bot.request_view)
+    activity_message = await caster_requests_channel.send(content=f"{role_ping} New caster request!", embed=embed, view=bot.request_view)
     bot.db.set_activity_message(req.request_id, activity_message.id)
     bot.db.set_cooldown(interaction.user.id)
 
     await interaction.response.send_message(
-        f"✅ Your caster request has been submitted. Request ID: **#{req.request_id}**", ephemeral=True
+        f"✅ Your caster request has been submitted. Request ID: **#{req.request_id}**\nPosted in <#{caster_requests_channel.id}>", ephemeral=True
     )
     await bot.log_event(interaction.guild, "Request Created", req)
 
