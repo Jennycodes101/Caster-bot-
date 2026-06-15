@@ -302,9 +302,10 @@ class CasterDB:
 
 
 class CasterRequestView(discord.ui.View):
-    def __init__(self, db: CasterDB):
+    def __init__(self, db: CasterDB, bot: "CasterBot"):
         super().__init__(timeout=None)
         self.db = db
+        self.bot = bot
 
     async def _set_availability(self, interaction: discord.Interaction, available: bool) -> None:
         request_id = extract_request_id(interaction.message)
@@ -338,6 +339,15 @@ class CasterRequestView(discord.ui.View):
 
         action = "available" if available else "unavailable"
         await interaction.response.send_message(f"You are now marked as **{action}** for request #{request_id}.", ephemeral=True)
+        
+        # If caster said YES (available), DM the requester
+        if available and req:
+            requester = self.bot.get_user(req.requester_id)
+            if requester:
+                try:
+                    await requester.send(f"✅ You are being casted by <@{interaction.user.id}>!")
+                except discord.Forbidden:
+                    pass
 
     @discord.ui.button(label="✅ Available", style=discord.ButtonStyle.success, custom_id="caster_request_available")
     async def available(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
@@ -410,7 +420,7 @@ class CasterBot(commands.Bot):
 
     async def setup_hook(self) -> None:
         # Create view instances with database reference
-        self.request_view = CasterRequestView(self.db)
+        self.request_view = CasterRequestView(self.db, self)
         self.ready_view = ReadyCasterView(self.db)
         
         # Add views for persistent button interactions
