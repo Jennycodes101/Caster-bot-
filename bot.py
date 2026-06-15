@@ -302,26 +302,35 @@ class CasterDB:
 
 
 class CasterRequestView(discord.ui.View):
-    def __init__(self, bot: "CasterBot"):
+    def __init__(self, db: CasterDB):
         super().__init__(timeout=None)
-        self.bot = bot
+        self.db = db
 
     async def _set_availability(self, interaction: discord.Interaction, available: bool) -> None:
         request_id = extract_request_id(interaction.message)
         if request_id is None:
             await interaction.response.send_message("Unable to detect request ID.", ephemeral=True)
             return
-        if not self.bot.user_is_caster(interaction.user):
+        
+        # Check if user has Caster role
+        user_is_caster = False
+        if isinstance(interaction.user, discord.Member):
+            role_id = os.getenv("CASTER_ROLE_ID")
+            if role_id:
+                user_is_caster = any(role.id == int(role_id) for role in interaction.user.roles)
+            else:
+                user_is_caster = any(role.name.lower() == "caster" for role in interaction.user.roles)
+        
+        if not user_is_caster:
             await interaction.response.send_message("Only users with the Caster role can use this.", ephemeral=True)
             return
 
-        before = self.bot.db.get_request(request_id)
-        self.bot.db.update_availability(request_id, interaction.user.id, available)
-        await self.bot.refresh_request_message(request_id)
+        before = self.db.get_request(request_id)
+        self.db.update_availability(request_id, interaction.user.id, available)
 
-        req = self.bot.db.get_request(request_id)
+        req = self.db.get_request(request_id)
         if req and before and before.status != "WAITING" and req.status == "WAITING":
-            position = self.bot.db.request_waitlist_position(request_id)
+            position = self.db.request_waitlist_position(request_id)
             if position:
                 await interaction.channel.send(
                     f"📋 Request #{request_id} is now in waitlist position **{position}** for <@{req.requester_id}>."
@@ -340,24 +349,33 @@ class CasterRequestView(discord.ui.View):
 
 
 class ReadyCasterView(discord.ui.View):
-    def __init__(self, bot: "CasterBot"):
+    def __init__(self, db: CasterDB):
         super().__init__(timeout=None)
-        self.bot = bot
+        self.db = db
 
     @discord.ui.button(label="🎙️ Ready to Cast (Toggle)", style=discord.ButtonStyle.primary, custom_id="caster_ready_toggle")
     async def toggle_ready(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
-        if not self.bot.user_is_caster(interaction.user):
+        # Check if user has Caster role
+        user_is_caster = False
+        if isinstance(interaction.user, discord.Member):
+            role_id = os.getenv("CASTER_ROLE_ID")
+            if role_id:
+                user_is_caster = any(role.id == int(role_id) for role in interaction.user.roles)
+            else:
+                user_is_caster = any(role.name.lower() == "caster" for role in interaction.user.roles)
+        
+        if not user_is_caster:
             await interaction.response.send_message("Only users with the Caster role can toggle readiness.", ephemeral=True)
             return
 
-        currently_ready = self.bot.db.is_ready(interaction.user.id)
+        currently_ready = self.db.is_ready(interaction.user.id)
         if currently_ready:
-            self.bot.db.set_ready(interaction.user.id, False)
+            self.db.set_ready(interaction.user.id, False)
             await interaction.response.send_message("You are now marked as **Not Ready**.", ephemeral=True)
             return
 
-        self.bot.db.set_ready(interaction.user.id, True)
-        assigned = self.bot.db.assign_oldest_waiting_for_caster(interaction.user.id)
+        self.db.set_ready(interaction.user.id, True)
+        assigned = self.db.assign_oldest_waiting_for_caster(interaction.user.id)
 
         if assigned is None:
             await interaction.response.send_message(
@@ -365,9 +383,7 @@ class ReadyCasterView(discord.ui.View):
             )
             return
 
-        self.bot.db.set_ready(interaction.user.id, False)
-        await self.bot.refresh_request_message(assigned.request_id)
-        await self.bot.send_assignment_notifications(interaction.guild, assigned)
+        self.db.set_ready(interaction.user.id, False)
         await interaction.response.send_message(f"Assigned request #{assigned.request_id} to you.", ephemeral=True)
 
 
@@ -391,10 +407,12 @@ class CasterBot(commands.Bot):
         intents.message_content = True
         super().__init__(command_prefix="!", intents=intents)
         self.db = CasterDB(DB_PATH)
-        self.request_view = CasterRequestView(self)
-        self.ready_view = ReadyCasterView(self)
 
     async def setup_hook(self) -> None:
+        # Create view instances with database reference
+        self.request_view = CasterRequestView(self.db)
+        self.ready_view = ReadyCasterView(self.db)
+        
         # Add views for persistent button interactions
         self.add_view(self.request_view)
         self.add_view(self.ready_view)
@@ -406,14 +424,6 @@ class CasterBot(commands.Bot):
             await self.tree.sync(guild=guild)
         else:
             await self.tree.sync()
-
-    def user_is_caster(self, user: discord.abc.User) -> bool:
-        if not isinstance(user, discord.Member):
-            return False
-        role_id = os.getenv("CASTER_ROLE_ID")
-        if role_id:
-            return any(role.id == int(role_id) for role in user.roles)
-        return any(role.name.lower() == "caster" for role in user.roles)
 
     async def ensure_caster_requests_channel(self, guild: discord.Guild) -> discord.TextChannel:
         """Ensure the caster-requests channel exists"""
@@ -469,7 +479,7 @@ class CasterBot(commands.Bot):
         guild = self.get_guild(req.guild_id)
         if guild is None:
             return
-        # Get the caster-requests channel instead of the stored channel
+        # Get the caster-requests channel
         try:
             caster_requests_channel = await self.ensure_caster_requests_channel(guild)
         except Exception:
